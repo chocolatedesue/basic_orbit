@@ -18,7 +18,7 @@ python3 orbit_solver.py formation 550 1000    # 1000 m 编队所需偏心率
 python3 orbit_solver.py los 550 1000          # 星间激光最大视距
 python3 orbit_solver.py --json match 550 53 1000   # JSON 输出
 
-python3 -m unittest discover -p 'test_*.py'    # 82 项解析校验
+python3 -m unittest discover -p 'test_*.py'    # 116 项解析校验
 ```
 
 集群级（多轨道组合成一个 cluster）：
@@ -28,6 +28,14 @@ python3 cluster_solver.py                      # 三个对比算例
 python3 cluster_solver.py design 53 24 15 14 13    # 共振高度 + 锁定倾角，一次生成
 python3 cluster_solver.py lock 550 53 800 1200     # 给定基准壳，解各层锁定倾角
 python3 cluster_solver.py analyze 低层:550:53:24:20 中层:800:47:18:16 --common-period 24
+```
+
+密集编队（百米~公里级紧密集群）：
+
+```bash
+python3 dense_formation.py                     # 81 星 / 1 km 半径参考算例
+python3 dense_formation.py analyze 650 81 1000 # 高度 / 星数 / 集群半径
+python3 dense_formation.py tolerance 650 100   # 反解 Δa 容差
 ```
 
 作为库使用：
@@ -194,6 +202,51 @@ $$\cos\theta(u) = \cos(\Delta\Omega)\left(\cos^2 u + \sin^2 u \cos^2 i\right) + 
 $u=0$（赤道）时 $\theta = \Delta\Omega$ 取最大，$u=90°$ 时两面收拢——
 所以邻面激光链路的最长距离出现在赤道，链路预算按赤道值算。
 
+## 密集编队可行性（`dense_formation.py`）
+
+`cluster_solver` 管的是"多壳层宏观拓扑"；这个模块管另一个尺度：
+**几十上百颗星挤在 1 km 半径内、彼此相距几百米**。
+
+这个尺度上成败不取决于绝对轨道，而取决于**差分量**：
+
+| 差分量 | 后果 | 量级（650 km） |
+| --- | --- | --- |
+| $\Delta a$ 半长轴失配 | 沿轨长期漂移 $3\pi\Delta a$ 每圈 | **1 m 失配 → 9.4 m/圈，51 km/年** |
+| $\Delta i$ 倾角失配 | 差分 J2 节面进动 → 横向散开 | 1 km 横向若走 $\Delta i$ → 44.8 km/年 |
+| $\Delta\Omega$ 升交点差 | $\dot\Omega$ 不依赖 $\Omega$ → **恒为零** | 0 km/年 |
+
+### 两条设计结论
+
+1. **半长轴必须匹配到亚米级**。漂移预算 100 m/天 → $\Delta a$ 容差仅 **72 cm**；
+   要一年只漂 100 m，容差是 **2 mm**。这是密集编队真正的工程门槛。
+2. **横向铺开要走 $\Delta\Omega$ 而不是 $\Delta i$**。因为 $\dot\Omega \propto a^{-3.5}\cos i$
+   与 $\Omega$ 无关，同 $a$ 同 $i$ 只差 $\Omega$ 的集群，一阶 J2 长期漂移天然为零
+   （J2-invariant），只剩差分气动阻力要管——而差分阻力可以靠姿态调制无推进剂修正。
+
+### 参考算例：81 星 / 1 km 半径 / 650 km 晨昏 SSO
+
+```
+周期          : 97.73 min（14.735 圈/天）
+节面进动      : +0.9856 °/天  = 360°/365.24 天 → 轨道面跟着太阳转
+最近邻间距    : 212 m（六方密排，81 星铺满 1 km 半径圆盘）
+2:1 相对椭圆  : e = 7.11e-05，径向 ±500 m，沿轨 ±1000 m，周期 97.73 min（闭合）
+最近邻时延    : 0.706 μs 单程
+接收功率增益  : 2.2e+07 倍（相对 1000 km 长程 ISL，1/d² 发散）
+```
+
+### API
+
+| 函数 | 作用 |
+| --- | --- |
+| `analyze_dense_cluster(h, i, n, radius_m)` | 密集集群完整体检 |
+| `along_track_drift(h, delta_a_m)` | $\Delta a$ → 每圈/每天/每年沿轨漂移 |
+| `semi_major_axis_tolerance_m(h, budget, days)` | 反解 $\Delta a$ 容差 |
+| `precession_sensitivity(h, i)` | $\partial\dot\Omega/\partial a$、$\partial\dot\Omega/\partial i$（对 $\Omega$ 恒为 0） |
+| `differential_nodal_drift(h, i, da, di)` | 差分进动与横向散开 |
+| `raan_offset_for_cross_track(...)` / `inclination_offset_for_cross_track(...)` | 两条横向路线对比 |
+| `packing_spacing_m(n, radius_m)` | 六方/网格堆积的最近邻间距 |
+| `light_time_us(d)` / `link_power_gain(far, near)` | 时延与 $1/d^2$ 功率增益 |
+
 ## 模型边界（什么时候不能用）
 
 - **共振壳层是惯性系周期共振**（全网相位复位），不是重复星下点轨迹；
@@ -202,6 +255,9 @@ $u=0$（赤道）时 $\theta = \Delta\Omega$ 取最大，$u=90°$ 时两面收�
 - **一级长期项**：只给 $\Omega$、$\omega$、$M$ 的长期漂移，不含短周期振荡（幅值约数 km）。
 - **编队几何是线性化（CW/HCW）解**，仅在相对距离 ≪ 轨道半径时成立（百米～数十公里量级）。
 - **集群分析只覆盖长期项**：会合周期、残余相位是一阶估计，不含短周期振荡与相位微调。
+- **密集编队的差分模型是一阶的**：$\Delta a$ 漂移与差分 J2 进动都取长期项线性化，
+  不含差分气动阻力（需要大气密度模型与面质比）、不含 J2 短周期项、不含碰撞规避。
+  真要定 delta-v 预算必须上数值积分。
 - **进动锁定不管相位**：面锁住只保证轨道面方位不散，同一面内的卫星仍按各自周期运行。
 - 需要米级绝对定轨、机动规划、碰撞预警时，请换用完整数值积分（SGP4/高精度力模型）。
 
