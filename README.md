@@ -18,7 +18,16 @@ python3 orbit_solver.py formation 550 1000    # 1000 m 编队所需偏心率
 python3 orbit_solver.py los 550 1000          # 星间激光最大视距
 python3 orbit_solver.py --json match 550 53 1000   # JSON 输出
 
-python3 -m unittest -v test_orbit_solver      # 38 项解析校验
+python3 -m unittest discover -p 'test_*.py'    # 82 项解析校验
+```
+
+集群级（多轨道组合成一个 cluster）：
+
+```bash
+python3 cluster_solver.py                      # 三个对比算例
+python3 cluster_solver.py design 53 24 15 14 13    # 共振高度 + 锁定倾角，一次生成
+python3 cluster_solver.py lock 550 53 800 1200     # 给定基准壳，解各层锁定倾角
+python3 cluster_solver.py analyze 低层:550:53:24:20 中层:800:47:18:16 --common-period 24
 ```
 
 作为库使用：
@@ -111,6 +120,80 @@ $$R_t = R_E + 80, \qquad D_{\max} = \sqrt{(R_E+h_1)^2 - R_t^2} + \sqrt{(R_E+h_2)
 > 那是笔误——把 $a_2/a_1 = 1.06495$ 代入 $\cos i_2 = \cos 53° \times 1.06495^{3.5} = 0.75005$，
 > 即 $i_2 = 41.40°$，本仓库的 `test_known_pairing_value` 锁定了这个值。
 
+## 集群组合分析（`cluster_solver.py`）
+
+把多条轨道装配成**一个协同 cluster** 时，必须先算清三件事：
+
+| 问题 | 判据 | 算不清的后果 |
+| --- | --- | --- |
+| **面共动**：构型会不会散架 | 各壳层 $\dot\Omega$ 是否一致 | 轨道面相对张开，几天后拓扑作废 |
+| **相位复位**：拓扑是否确定 | 各壳层在公共周期内是否跑整数圈 | 相位漂移，路由表无法预编译 |
+| **链路可达**：能不能连上 | 星间实际间距 vs. 激光视距上限 | 设计图上的链路物理上不存在 |
+
+### 核心结论：高度和倾角是两个独立旋钮
+
+这是把多壳层组成确定性 cluster 的关键——两个约束**互不冲突**，可以同时满足：
+
+1. **高度旋钮**：由共振阶数 $k$ 定死，$a_k = (\mu(T_{\text{common}}/2\pi k)^2)^{1/3}$ → 保证相位复位
+2. **倾角旋钮**：再由进动锁定方程解出，$\cos i_k = \cos i_1 (a_k/a_1)^{3.5}$ → 保证面共动
+
+唯一的限制是进动匹配的高度天花板 $a_{\max} = a_1(1/|\cos i_1|)^{1/3.5}$。
+
+`design_resonant_locked_cluster(53, 24, [15, 14, 13])` 一次拧完两个旋钮：
+
+| 壳层 | 高度 km | 倾角 | 周期 min | 进动 °/天 | 24h 圈数 |
+| --- | --- | --- | --- | --- | --- |
+| k=15 | 566.90 | 53.000° | 96.00 | −4.4511 | 15.000000 |
+| k=14 | 893.80 | 45.014° | 102.86 | −4.4511 | 14.000000 |
+| k=13 | 1262.09 | 32.820° | 110.77 | −4.4511 | 13.000000 |
+
+进动极差 $1.8\times10^{-15}$ °/天（浮点噪声量级）→ 轨道面永久共动；
+残余相位严格为 0 → 全网几何每 24 小时精确复现。
+
+副产物：相邻壳层每天正好会合一次（$T_{\text{syn}} = 24$ h），k=15 与 k=13 每 12 小时会合一次
+——跨层接触节奏本身也是确定的。
+
+### 三个对比算例
+
+`python3 cluster_solver.py` 依次跑：
+
+- **算例 A（反面教材）**：三层都用 53°。进动极差 1.209 °/天，**相对张开 1° 只要 0.83 天**，
+  半年后轨道面互相转过 200 度以上，整个拓扑失效。
+- **算例 B（只拧倾角）**：高度随手挑，倾角解锁定方程。面锁住了 ✓，
+  但 24h 圈数是 15.055 / 14.275 / 13.160，残余相位 19.8° / 99.1° / 57.6° ✗。
+- **算例 C（两个旋钮）**：面共动 ✓ + 相位复位 ✓ 同时成立。
+
+### 集群级 API
+
+```python
+from cluster_solver import Shell, analyze_cluster, design_resonant_locked_cluster, format_report
+
+design = design_resonant_locked_cluster(
+    base_inclination_deg=53.0, common_period_hours=24.0,
+    k_values=[15, 14, 13], planes=24, sats_per_plane=20)
+print(format_report(analyze_cluster(design["shells"], common_period_hours=24.0)))
+```
+
+| 函数 | 作用 |
+| --- | --- |
+| `Shell(name, h, i, planes, sats_per_plane, phasing_f)` | Walker 记法 `i: t/p/f` 的壳层定义 |
+| `design_resonant_locked_cluster(...)` | 两个旋钮一起拧，生成完整集群 |
+| `design_locked_cluster(base, altitudes)` | 只拧倾角旋钮，给定高度求锁定倾角 |
+| `analyze_cluster(shells, common_period_hours)` | 集群体检：共动 / 复位 / 可达 |
+| `check_common_repeat(shells, T_hours)` | 各壳层残余相位与复位判定 |
+| `pair_analysis(a, b)` | 差分进动、会合周期、最近间距、视距上限 |
+| `intra_shell_geometry(shell)` | 同面 / 邻面间距与视距校验 |
+| `synodic_period(a, b)` | 会合周期 $1/\|1/T_a - 1/T_b\|$ |
+| `central_angle_between_planes(i, dRAAN, u)` | 邻面同相位星的地心张角 |
+| `format_report(analysis)` | 输出可读的集群报告 |
+
+其中邻面几何用的是闭式解：
+
+$$\cos\theta(u) = \cos(\Delta\Omega)\left(\cos^2 u + \sin^2 u \cos^2 i\right) + \sin^2 u \sin^2 i$$
+
+$u=0$（赤道）时 $\theta = \Delta\Omega$ 取最大，$u=90°$ 时两面收拢——
+所以邻面激光链路的最长距离出现在赤道，链路预算按赤道值算。
+
 ## 模型边界（什么时候不能用）
 
 - **共振壳层是惯性系周期共振**（全网相位复位），不是重复星下点轨迹；
@@ -118,6 +201,8 @@ $$R_t = R_E + 80, \qquad D_{\max} = \sqrt{(R_E+h_1)^2 - R_t^2} + \sqrt{(R_E+h_2)
 - **无阻力模型**：低于 ~400 km 时半长轴实际会持续衰减，需要定期抬轨维持。
 - **一级长期项**：只给 $\Omega$、$\omega$、$M$ 的长期漂移，不含短周期振荡（幅值约数 km）。
 - **编队几何是线性化（CW/HCW）解**，仅在相对距离 ≪ 轨道半径时成立（百米～数十公里量级）。
+- **集群分析只覆盖长期项**：会合周期、残余相位是一阶估计，不含短周期振荡与相位微调。
+- **进动锁定不管相位**：面锁住只保证轨道面方位不散，同一面内的卫星仍按各自周期运行。
 - 需要米级绝对定轨、机动规划、碰撞预警时，请换用完整数值积分（SGP4/高精度力模型）。
 
 ## 校验依据
@@ -125,3 +210,8 @@ $$R_t = R_E + 80, \qquad D_{\max} = \sqrt{(R_E+h_1)^2 - R_t^2} + \sqrt{(R_E+h_2)
 `test_orbit_solver.py` 用公开工程基准做交叉验证：星链 550 km/53° 壳的周期与进动、
 800 km 太阳同步倾角 98.6°、恒星日反解 GEO 高度 35786 km、临界倾角 63.435° 近地点冻结、
 以及最大视距连线到地心的最近距离恰好等于 $R_E + 80$ km（几何自洽性）。
+
+`test_cluster_solver.py` 校验集群层：极轨面在极点收拢（$\theta \to 0$）、赤道处张角等于
+$\Delta\Omega$、15 与 14 圈/天的会合周期恰为 86400 s、
+以及核心断言 `test_resonant_design_satisfies_both_constraints`
+——同一组壳层同时满足整数共振与进动锁定。
