@@ -18,7 +18,7 @@ python3 orbit_solver.py formation 550 1000    # 1000 m 编队所需偏心率
 python3 orbit_solver.py los 550 1000          # 星间激光最大视距
 python3 orbit_solver.py --json match 550 53 1000   # JSON 输出
 
-python3 -m unittest discover -p 'test_*.py'    # 116 项解析校验
+python3 -m unittest discover -p 'test_*.py'    # 150 项解析校验
 ```
 
 集群级（多轨道组合成一个 cluster）：
@@ -36,6 +36,15 @@ python3 cluster_solver.py analyze 低层:550:53:24:20 中层:800:47:18:16 --comm
 python3 dense_formation.py                     # 81 星 / 1 km 半径参考算例
 python3 dense_formation.py analyze 650 81 1000 # 高度 / 星数 / 集群半径
 python3 dense_formation.py tolerance 650 100   # 反解 Δa 容差
+```
+
+重复星下点与地面接触周期：
+
+```bash
+python3 ground_track.py                        # 650 km SSO 周期谱
+python3 ground_track.py spectrum 650 --station-latitude 78
+python3 ground_track.py repeat 103 7           # 反解重复星下点高度
+python3 ground_track.py contact 650            # 单次过顶窗口
 ```
 
 作为库使用：
@@ -247,6 +256,57 @@ $u=0$（赤道）时 $\theta = \Delta\Omega$ 取最大，$u=90°$ 时两面收�
 | `packing_spacing_m(n, radius_m)` | 六方/网格堆积的最近邻间距 |
 | `light_time_us(d)` / `link_power_gain(far, near)` | 时延与 $1/d^2$ 功率增益 |
 
+## 重复星下点与地面接触（`ground_track.py`）
+
+`solve_resonant_shells` 算的是**惯性系**相位复位；但"什么时候能和地面通信"
+由**星下点轨迹**决定，需要两个额外修正：
+
+1. **交点周期**而非开普勒周期。J2 让 $M$ 与 $\omega$ 都长期漂移：
+   $T_{\text{nodal}} = 2\pi/(\dot M + \dot\omega)$，650 km SSO 上比开普勒周期长 **7.25 s**
+2. **交点日**而非恒星日。地球要追的是**进动中的**轨道面：
+   $T_{\text{nodal day}} = 2\pi/(\omega_E - \dot\Omega)$
+   —— 太阳同步轨道上此值精确等于一个平太阳日（86400 s）
+
+两个修正合起来把 650 km 的"每天圈数"从 14.735 改成 **14.717**，足以选错重复周期。
+
+### 关键结果：+723 m 把 I/O 变成严格周期
+
+650 km 附近的可选重复周期：
+
+| N圈/M天 | 圈/交点日 | 需要高度 | 相对 650 km | 轨迹经度间隔 |
+|---|---|---|---|---|
+| **103/7** | 14.71429 | **650.723 km** | **+0.723 km** | 24.466° |
+| 265/18 | 14.72222 | 648.192 km | −1.808 km | 24.453° |
+| 250/17 | 14.70588 | 653.407 km | +3.407 km | 24.480° |
+| 147/10 | 14.70000 | 655.286 km | +5.286 km | 24.490° |
+
+**高度抬高 723 米，地面接触模式就每 7 天精确复现一次。** 对算力集群，
+这意味着 I/O 可用性从"近似周期"变成"严格周期"——调度可以离线预编译。
+
+### 时间尺度谱（650 km 晨昏 SSO）
+
+| 节拍 | 时长 | 支配 |
+|---|---|---|
+| 交点周期 / 星间相对椭圆 | 97.85 min | 链路距离 → 带宽（$1/d^2$） |
+| 单次过顶窗口 | 9.05 min（仰角 10°） | 单次 I/O 窗口 |
+| 交点日 | 24.00 h | 星下点经度推进 |
+| 重复星下点 | 7 天 | **地面接触模式完全复现** |
+| 太阳同步年周期 | 365.24 天 | beta 角 / 光照 / 热 |
+
+单站占空比（纬度 60°，仰角门限 10°）：≈5.4 次/天、≈33 min/天、**2.3%**。
+
+### API
+
+| 函数 | 作用 |
+| --- | --- |
+| `nodal_period(a, i)` / `nodal_day(a, i)` | J2 交点周期与交点日 |
+| `revs_per_nodal_day(h, i)` | 重复星下点判据的核心量 |
+| `solve_repeat_altitude(N, M)` | 反解 N圈/M天 重复的高度（二分求根） |
+| `find_repeat_options(h)` | 列出附近可用周期及所需高度微调 |
+| `contact_window(h, mask)` | 单次过顶半张角与最长时长 |
+| `passes_per_day_estimate(h, lat)` | 过顶次数与占空比（一阶估计） |
+| `periodicity_spectrum(h)` | 全部时间尺度一览 |
+
 ## 模型边界（什么时候不能用）
 
 - **共振壳层是惯性系周期共振**（全网相位复位），不是重复星下点轨迹；
@@ -259,6 +319,9 @@ $u=0$（赤道）时 $\theta = \Delta\Omega$ 取最大，$u=90°$ 时两面收�
   不含差分气动阻力（需要大气密度模型与面质比）、不含 J2 短周期项、不含碰撞规避。
   真要定 delta-v 预算必须上数值积分。
 - **进动锁定不管相位**：面锁住只保证轨道面方位不散，同一面内的卫星仍按各自周期运行。
+- **`passes_per_day_estimate` 只是量级估计**：把星下点看成等经度间隔铺开，
+  忽略轨迹倾斜与高纬收敛，在站点纬度接近倾角时失效。要精确的接触窗口表
+  必须做真实星历传播（SGP4 + 地面站可见性）。
 - 需要米级绝对定轨、机动规划、碰撞预警时，请换用完整数值积分（SGP4/高精度力模型）。
 
 ## 校验依据
